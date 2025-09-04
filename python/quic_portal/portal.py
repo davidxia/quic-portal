@@ -217,6 +217,9 @@ class Portal:
                 logger.debug("[server] Waiting for client to register...")
                 time.sleep(0.2)
 
+            logger.debug("[server] Waiting 0.2s for client to establish initial NAT mapping")
+            time.sleep(0.2)
+
             attempts = 0
 
             # Use these to establish mappings at server-side NAT
