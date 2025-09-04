@@ -22,7 +22,23 @@ app = modal.App("quic-portal-simple")
 # Modal image with quic-portal installed
 image = (
     modal.Image.debian_slim()
-    .pip_install("quic-portal==0.1.13")
+    .pip_install("maturin")
+    .run_commands("apt-get update && apt-get install -y build-essential pkg-config libssl-dev curl")
+    .run_commands(
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+        ". $HOME/.cargo/env",
+    )
+    # Copy and build quic-portal (copy=True allows subsequent build steps)
+    .add_local_file("pyproject.toml", "/tmp/quic-portal/pyproject.toml", copy=True)
+    .add_local_file("Cargo.toml", "/tmp/quic-portal/Cargo.toml", copy=True)
+    .add_local_file("Cargo.lock", "/tmp/quic-portal/Cargo.lock", copy=True)
+    .add_local_file("README.md", "/tmp/quic-portal/README.md", copy=True)
+    .add_local_dir("src", "/tmp/quic-portal/src", copy=True)
+    .add_local_dir("python", "/tmp/quic-portal/python", copy=True)
+    .run_commands(
+        "cd /tmp/quic-portal && . $HOME/.cargo/env && maturin build --release",
+        "cd /tmp/quic-portal && pip install target/wheels/*.whl",
+    )
 )
 
 
