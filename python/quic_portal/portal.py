@@ -238,7 +238,9 @@ class Portal:
                     sock.sendto(b"punch", endpoint)
 
                 try:
+                    logger.debug("[server] AAA reading from socket")
                     data, addr = sock.recvfrom(1024)
+                    logger.debug("[server] AAA finished reading from socket")
                     dst_ip, dst_port = sock.getsockname()
                     logger.debug(
                         f"[server] RECV 5-tuple: {addr[0]}:{addr[1]} -> {dst_ip}:{dst_port} UDP data={data!r}"
@@ -250,7 +252,9 @@ class Portal:
                         linger_deadline = min(time.time() + 1.0, start_time + punch_timeout)
                         while time.time() < linger_deadline:
                             try:
+                                logger.debug("[server] BBB reading from socket")
                                 data2, addr2 = sock.recvfrom(1024)
+                                logger.debug("[server] BBB finished reading from socket")
                                 logger.debug(
                                     f"[server] RECV 5-tuple: {addr2[0]}:{addr2[1]} -> {dst_ip}:{dst_port} UDP data={data2!r}"
                                 )
@@ -358,7 +362,9 @@ class Portal:
                 )
                 sock.sendto(b"punch", (server_ip, server_port))
                 try:
+                    logger.debug("[client] CCC reading from socket")
                     data, addr = sock.recvfrom(1024)
+                    logger.debug("[client] CCC finished reading from socket")
                     dst_ip, dst_port = sock.getsockname()
                     logger.debug(
                         f"[client] RECV 5-tuple: {addr[0]}:{addr[1]} -> {dst_ip}:{dst_port} UDP data={data!r}"
