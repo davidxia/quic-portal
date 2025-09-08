@@ -17,7 +17,7 @@ import os
 import modal
 
 # Create Modal app
-app = modal.App("quic-portal-simple")
+app = modal.App("dxia-quic-portal-simple")
 
 # Modal image with quic-portal installed
 image = (
@@ -41,10 +41,14 @@ image = (
 )
 
 
-@app.function(image=image)
+@app.function(image=image, region="us-west-1")
 def run_server(coord_dict: modal.Dict):
     """Simple server that echoes messages back to client."""
     from quic_portal import Portal
+    import logging
+
+    logger = logging.getLogger("quic_portal")
+    logger.setLevel(logging.DEBUG)
 
     print(f"[SERVER] Starting server {os.getenv('MODAL_TASK_ID')}...")
 
@@ -79,11 +83,15 @@ def run_server(coord_dict: modal.Dict):
 def run_client(coord_dict: modal.Dict):
     """Simple client that sends messages and receives echoes."""
     from quic_portal import Portal
+    import logging
+
+    logger = logging.getLogger("quic_portal")
+    logger.setLevel(logging.DEBUG)
 
     print("[CLIENT] Starting client...")
 
     # Create client with NAT traversal
-    portal = Portal.create_client(dict=coord_dict, local_port=5556)
+    portal = Portal.create_client(dict=coord_dict, local_port=5557)
 
     print("[CLIENT] Connected! Sending messages...")
 

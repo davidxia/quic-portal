@@ -1,4 +1,5 @@
 import logging
+import os
 import socket as socketlib
 import time
 from typing import Optional, Union, Any
@@ -152,17 +153,30 @@ class Portal:
         self.server_port = None
 
     @staticmethod
-    def _send_punch_ack_burst(sock: socketlib.socket, addr: tuple[str, int]) -> None:
+    def _send_burst(sock: socketlib.socket, addr: tuple[str, int], data: bytes, log_prefix: str) -> None:
         """
-        Send a small burst of punch-acks to improve reliability against UDP loss/NAT timing.
+        Send a small burst of data to improve reliability against UDP loss/NAT timing.
         """
         src_ip, src_port = sock.getsockname()
         for _ in range(5):
             logger.debug(
-                f"[server] SEND punch-ack 5-tuple: {src_ip}:{src_port} -> {addr[0]}:{addr[1]} UDP"
+                f"{log_prefix} SEND {data!r} 5-tuple: {src_ip}:{src_port} -> {addr[0]}:{addr[1]} UDP"
             )
-            sock.sendto(b"punch-ack", addr)
+            sock.sendto(data, addr)
             time.sleep(0.03)
+
+    @staticmethod
+    def get_local_ip() -> str:
+        s = socketlib.socket(socketlib.AF_INET, socketlib.SOCK_DGRAM)
+        try:
+            # Connect to a public server (doesn't send data) to get the local IP
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        except Exception:
+            local_ip = "127.0.0.1"  # Fallback to localhost if connection fails
+        finally:
+            s.close()
+        return local_ip
 
     @staticmethod
     def create_server(
@@ -189,11 +203,17 @@ class Portal:
             Connected Portal instance
         """
 
+        cloud_provider = os.getenv("MODAL_CLOUD_PROVIDER", "unknown")
+        region = os.getenv("MODAL_REGION", "unknown")
+        dict["server_cloud_provider"] = cloud_provider
+        dict["server_region"] = region
+
         sock = get_socket(local_port)
 
         try:
             # Get external IP/port via STUN
             pub_addrs = Portal._get_ext_addr(sock, stun_servers)
+            logger.debug(f"[server] Server local IP address: {Portal.get_local_ip()}")
             logger.debug(f"[server] Public endpoints: {pub_addrs}")
 
             # Register with coordination dict and wait for client
@@ -217,21 +237,36 @@ class Portal:
                 logger.debug("[server] Waiting for client to register...")
                 time.sleep(0.2)
 
-            attempts = 0
+            # Add coordination delay to avoid race conditions
+            # This is critical: server should wait for client to start punching first
+            # to handle symmetric NATs properly
+            logger.debug("[server] Waiting for client to establish initial NAT mapping...")
+            time.sleep(1.0)  # Give client time to start punching and establish mapping
 
             # Use these to establish mappings at server-side NAT
             client_addrs_to_hit = set(client_endpoints)
+            foo = set(client_endpoints)
 
             # Punch NAT
             punch_success = False
             start_time = time.time()
+            attempts = 0
+
+            logger.info(f"[server] Starting NAT punch to {len(client_addrs_to_hit)} client endpoints")
+
             while time.time() - start_time < punch_timeout:
+                for endpoint in foo:
+                    Portal._send_burst(sock, endpoint, b"punch", "[server]")
+
+                n = 0
                 for endpoint in client_addrs_to_hit:
                     src_ip, src_port = sock.getsockname()
-                    logger.debug(
-                        f"[server] SEND punch 5-tuple: {src_ip}:{src_port} -> {endpoint[0]}:{endpoint[1]} UDP"
-                    )
+                    if attempts >= 30 and n % attempts == 0:
+                        logger.debug(
+                            f"[server] SEND punch 5-tuple: {src_ip}:{src_port} -> {endpoint[0]}:{endpoint[1]} UDP"
+                        )
                     sock.sendto(b"punch", endpoint)
+                    n += 1
 
                 try:
                     data, addr = sock.recvfrom(1024)
@@ -240,7 +275,7 @@ class Portal:
                         f"[server] RECV 5-tuple: {addr[0]}:{addr[1]} -> {dst_ip}:{dst_port} UDP data={data!r}"
                     )
                     if data == b"punch":
-                        Portal._send_punch_ack_burst(sock, addr)
+                        Portal._send_burst(sock, addr, b"punch-ack", "[server]")
 
                         # Briefly linger to re-ack any duplicate punches to align with NAT timing windows
                         linger_deadline = min(time.time() + 1.0, start_time + punch_timeout)
@@ -251,7 +286,7 @@ class Portal:
                                     f"[server] RECV 5-tuple: {addr2[0]}:{addr2[1]} -> {dst_ip}:{dst_port} UDP data={data2!r}"
                                 )
                                 if data2 == b"punch":
-                                    Portal._send_punch_ack_burst(sock, addr2)
+                                    Portal._send_burst(sock, addr2, b"punch-ack", "[server]")
                             except socketlib.timeout:
                                 # Keep looping until linger timeout
                                 pass
@@ -260,21 +295,33 @@ class Portal:
                         break
                 except socketlib.timeout:
                     attempts += 1
-                    client_ips = set(addr[0] for addr in client_addrs_to_hit)
+                    # Expand search space gradually for symmetric NATs
+                    client_ips = set(addr[0] for addr in client_endpoints)
 
-                    if attempts == 1:
+                    if attempts == 10:  # After 10 attempts, try nearby ports
+                        logger.debug("[server] Expanding to nearby ports for symmetric NAT (-10 to 10 from base port)")
+                        for client_ip in client_ips:
+                            for base_port in [ep[1] for ep in client_endpoints]:
+                                for offset in range(-10, 11):
+                                    port = base_port + offset
+                                    if 1024 <= port <= 65535:
+                                        client_addrs_to_hit.add((client_ip, port))
+                    elif attempts == 30:  # After 30 attempts, try broader range
+                        logger.debug("[server] Expanding to broader port range 1000-9999 for symmetric NAT")
                         for client_ip in client_ips:
                             for _port in range(1000, 9999):
                                 client_addrs_to_hit.add((client_ip, _port))
-                    elif attempts == 2:
+                    elif attempts == 60:  # After 60 attempts, try broadest range
+                        logger.debug("[server] Expanding to broader port range 1000-65535 for symmetric NAT")
                         for client_ip in client_ips:
                             for _port in range(1000, 65535):
                                 client_addrs_to_hit.add((client_ip, _port))
 
+                    time.sleep(0.1)
                     continue
 
             if not punch_success:
-                raise ConnectionError("Failed to punch NAT with client")
+                raise ConnectionError(f"Failed to punch NAT with client from cloud {cloud_provider} in region {region}")
 
             # Close UDP socket before QUIC can use the port
             sock.close()
@@ -348,12 +395,16 @@ class Portal:
             # Punch NAT
             punch_success = False
             start_time = time.time()
+            punch_attempts = 0
+            server_cloud_provider = dict.get("server_cloud_provider", "not set")
+            server_region = dict.get("server_region", "not set")
+
             while time.time() - start_time < punch_timeout:
                 src_ip, src_port = sock.getsockname()
                 logger.debug(
                     f"[client] SEND punch 5-tuple: {src_ip}:{src_port} -> {server_ip}:{server_port} UDP"
                 )
-                sock.sendto(b"punch", (server_ip, server_port))
+                Portal._send_burst(sock, (server_ip, server_port), b"punch", "[client]")
                 try:
                     data, addr = sock.recvfrom(1024)
                     dst_ip, dst_port = sock.getsockname()
@@ -365,19 +416,23 @@ class Portal:
                         punch_success = True
                         break
                     else:
-                        logger.debug(f"[client] Message from {addr}, continuing to wait for punch-ack")
+                        logger.debug(f"[client] Message {data!r} from {addr}, continuing to wait for punch-ack")
                         continue
                 except socketlib.timeout:
+                    punch_attempts += 1
+                    if punch_attempts % 20 == 0:
+                        logger.debug(f"[client] No packets received after {punch_attempts} attempts ({time.time() - start_time:.1f}s)")
+                    time.sleep(0.1)
                     continue
 
             if not punch_success:
-                raise ConnectionError("Failed to punch NAT with server")
+                raise ConnectionError(f"Failed to punch NAT with server {server_ip}:{server_port} from cloud {server_cloud_provider} in region {server_region}")
 
             logger.debug("[client] Punch successful, establishing QUIC connection")
 
             # Close UDP socket before QUIC can use the port
             sock.close()
-            logger.info("[client] nat traversal successful")
+            logger.info(f"[client] nat traversal successful with server {server_ip}:{server_port} from cloud {server_cloud_provider} in region {server_region}")
 
             # Wait a moment to ensure socket is properly closed
             time.sleep(0.05)
